@@ -11,7 +11,8 @@ class ReLU(Function):
         return x * (x > 0)
 
     @staticmethod
-    def backward(ctx, grad_output) -> Any:
+    def backward(ctx, *grad_output) -> Any:
+        (grad_output,) = grad_output
         (x,) = ctx.saved_tensors
         return grad_output * (x > 0)
 
@@ -27,7 +28,8 @@ class SoftMax(Function):
         return out
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, *grad_output):
+        (grad_output,) = grad_output
         (out,) = ctx.saved_tensors
         dot = (grad_output * out).sum(dim=-1, keepdim=True)
         return out * (grad_output - dot)
@@ -46,7 +48,8 @@ class LayerNorm(Function):
         return out
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, *grad_output):
+        (grad_output,) = grad_output
         x_norm, rstd, weight = ctx.saved_tensors
         N = x_norm.shape[-1]
 
