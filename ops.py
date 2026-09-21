@@ -1,7 +1,30 @@
+import pathlib
 from typing import Any
 
 import torch
 from torch.autograd import Function
+
+_CSRC_DIR = pathlib.Path(__file__).parent / "csrc"
+_gelu_cuda_ext = None
+
+
+def _load_gelu_cuda_ext():
+    """JIT-compile the GELU CUDA extension on first use (torch.utils.cpp_extension.load
+    invokes nvcc + a C++ compiler and caches the .so under ~/.cache/torch_extensions)."""
+    global _gelu_cuda_ext
+    if _gelu_cuda_ext is None:
+        from torch.utils.cpp_extension import load
+
+        _gelu_cuda_ext = load(
+            name="gelu_cuda_ext",
+            sources=[
+                str(_CSRC_DIR / "gelu_ext.cpp"),
+                str(_CSRC_DIR / "gelu_kernel.cu"),
+            ],
+            extra_cuda_cflags=["-O3", "--use_fast_math"],
+            verbose=False,
+        )
+    return _gelu_cuda_ext
 
 
 class ReLU(Function):
@@ -68,3 +91,22 @@ class LayerNorm(Function):
         )
 
         return grad_x, grad_weight, grad_bias
+
+
+class GELU(Function):
+    """Exact GELU (via erf), forward and backward computed by a hand-written CUDA
+    kernel in csrc/gelu_cuda.cu instead of composed torch ops. CUDA-only."""
+
+    @staticmethod
+    def forward(ctx, x) -> Any:
+        ext = _load_gelu_cuda_ext()
+        x = x.contiguous()
+        ctx.save_for_backward(x)
+        return ext.forward(x)
+
+    @staticmethod
+    def backward(ctx, *grad_output) -> Any:
+        (grad_output,) = grad_output
+        (x,) = ctx.saved_tensors
+        ext = _load_gelu_cuda_ext()
+        return ext.backward(grad_output.contiguous(), x)

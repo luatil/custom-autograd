@@ -6,12 +6,13 @@ Benchmark custom implementation against builtin torch implementation.
 | relu | 435 us | 39 us | 18 us | 2x |
 | softmax | 684 us | 62 us | 22 us | 3x |
 | layernorm | 4490 us | 100 us | 25 us | 4x |
+| gelu (raw CUDA kernel) | n/a | 33 us | 19 us | 2x |
 """
 
 import torch
 import torch.utils.benchmark as benchmark
 
-from ops import LayerNorm, ReLU, SoftMax
+from ops import GELU, LayerNorm, ReLU, SoftMax
 
 
 def bench(fn, *args, label):
@@ -51,6 +52,13 @@ def main():
     print(s2)
     print(l1)
     print(l2)
+
+    # compare gelu (only runs on GPU: the custom implementation is a raw CUDA kernel)
+    if device.type == "cuda":
+        g1 = bench(GELU.apply, x, label="custom gelu (CUDA kernel)")
+        g2 = bench(torch.nn.functional.gelu, x, label="torch gelu")
+        print(g1)
+        print(g2)
 
 
 if __name__ == "__main__":
