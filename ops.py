@@ -20,6 +20,7 @@ def _load_gelu_cuda_ext():
             sources=[
                 str(_CSRC_DIR / "gelu_ext.cpp"),
                 str(_CSRC_DIR / "gelu_kernel.cu"),
+                str(_CSRC_DIR / "gelu_kernel_optimized.cu"),
             ],
             extra_cuda_cflags=["-O3", "--use_fast_math"],
             verbose=False,
@@ -114,6 +115,28 @@ class GELU(Function):
         (x,) = ctx.saved_tensors
         ext = _load_gelu_cuda_ext()
         return ext.backward(grad_output.contiguous(), x)
+
+
+class GELUOptimized(Function):
+    """Same math as GELU, but the kernel (csrc/gelu_kernel_optimized.cu) loads/stores
+    128 bits per thread (float4 for float32, double2 for float64) instead of one scalar,
+    matching the vectorization ATen's own elementwise kernels use. See README for the
+    profiling that showed the naive GELU kernel is slower than torch's on the GPU
+    itself, not just at the launch/dispatch layer, and that this is why."""
+
+    @staticmethod
+    def forward(ctx, x) -> Any:
+        ext = _load_gelu_cuda_ext()
+        x = x.contiguous()
+        ctx.save_for_backward(x)
+        return ext.forward_optimized(x)
+
+    @staticmethod
+    def backward(ctx, *grad_output) -> Any:
+        (grad_output,) = grad_output
+        (x,) = ctx.saved_tensors
+        ext = _load_gelu_cuda_ext()
+        return ext.backward_optimized(grad_output.contiguous(), x)
 
 
 def gelu_native(x):

@@ -6,6 +6,7 @@
 #include <torch/library.h>
 
 #include "gelu_kernel.h"
+#include "gelu_kernel_optimized.h"
 
 torch::Tensor custom_gelu_forward(torch::Tensor x) {
   TORCH_CHECK(x.is_cuda(), "custom_gelu_forward: x must be a CUDA tensor");
@@ -38,9 +39,42 @@ torch::Tensor custom_gelu_backward(torch::Tensor grad_output, torch::Tensor x) {
   return grad_input;
 }
 
+torch::Tensor custom_gelu_forward_optimized(torch::Tensor x) {
+  TORCH_CHECK(x.is_cuda(), "custom_gelu_forward_optimized: x must be a CUDA tensor");
+  TORCH_CHECK(x.is_contiguous(), "custom_gelu_forward_optimized: x must be contiguous");
+
+  auto y = torch::empty_like(x);
+  const int64_t n = x.numel();
+
+  AT_DISPATCH_FLOATING_TYPES(x.scalar_type(), "gelu_forward_cuda_optimized", ([&] {
+    gelu_forward_launcher_optimized<scalar_t>(x.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), n);
+  }));
+
+  return y;
+}
+
+torch::Tensor custom_gelu_backward_optimized(torch::Tensor grad_output, torch::Tensor x) {
+  TORCH_CHECK(grad_output.is_cuda(), "custom_gelu_backward_optimized: grad_output must be a CUDA tensor");
+  TORCH_CHECK(x.is_cuda(), "custom_gelu_backward_optimized: x must be a CUDA tensor");
+  TORCH_CHECK(grad_output.is_contiguous(), "custom_gelu_backward_optimized: grad_output must be contiguous");
+  TORCH_CHECK(x.is_contiguous(), "custom_gelu_backward_optimized: x must be contiguous");
+
+  auto grad_input = torch::empty_like(x);
+  const int64_t n = x.numel();
+
+  AT_DISPATCH_FLOATING_TYPES(x.scalar_type(), "gelu_backward_cuda_optimized", ([&] {
+    gelu_backward_launcher_optimized<scalar_t>(grad_output.data_ptr<scalar_t>(), x.data_ptr<scalar_t>(),
+                                                grad_input.data_ptr<scalar_t>(), n);
+  }));
+
+  return grad_input;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &custom_gelu_forward, "GELU forward (CUDA)");
   m.def("backward", &custom_gelu_backward, "GELU backward (CUDA)");
+  m.def("forward_optimized", &custom_gelu_forward_optimized, "GELU forward, vectorized (CUDA)");
+  m.def("backward_optimized", &custom_gelu_backward_optimized, "GELU backward, vectorized (CUDA)");
 }
 
 // --- Native ATen op --------------------------------------------------------------

@@ -6,17 +6,20 @@ Benchmark custom implementation against builtin torch implementation.
 | relu | 435 us | 39 us | 18 us | 2x |
 | softmax | 684 us | 62 us | 22 us | 3x |
 | layernorm | 4490 us | 100 us | 25 us | 4x |
-| gelu (raw CUDA kernel, Python autograd) | n/a | 33 us | 19 us | 2x |
-| gelu_native (same kernel, native ATen op) | n/a | 45 us | 19 us | 2.4x |
+| gelu (raw CUDA kernel, Python autograd) | n/a | 42 us | 22 us | 1.9x |
+| gelu_native (same kernel, native ATen op) | n/a | 53 us | 22 us | 2.4x |
+| gelu_optimized (vectorized CUDA kernel) | n/a | 39 us | 22 us | 1.8x |
 
 See bench_gelu_overhead.py for why gelu_native (a native ATen op, meant to bypass
-autograd.Function overhead) ends up slower than GELU, not faster.
+autograd.Function overhead) ends up slower than GELU, not faster, and
+bench_gelu_profile.py for why gelu_optimized's vectorized kernel closes most of the
+remaining gap.
 """
 
 import torch
 import torch.utils.benchmark as benchmark
 
-from ops import GELU, LayerNorm, ReLU, SoftMax, gelu_native
+from ops import GELU, GELUOptimized, LayerNorm, ReLU, SoftMax, gelu_native
 
 
 def bench(fn, *args, label):
@@ -61,10 +64,12 @@ def main():
     if device.type == "cuda":
         g1 = bench(GELU.apply, x, label="custom gelu (CUDA kernel)")
         g2 = bench(gelu_native, x, label="custom gelu_native (native ATen op)")
-        g3 = bench(torch.nn.functional.gelu, x, label="torch gelu")
+        g3 = bench(GELUOptimized.apply, x, label="custom gelu_optimized (vectorized kernel)")
+        g4 = bench(torch.nn.functional.gelu, x, label="torch gelu")
         print(g1)
         print(g2)
         print(g3)
+        print(g4)
 
 
 if __name__ == "__main__":
