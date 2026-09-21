@@ -1,16 +1,23 @@
 """
-Decompose GELU's slowdown vs. torch into (1) autograd.Function/Python overhead and
-(2) actual kernel cost, by comparing three call paths at multiple tensor sizes:
+Decompose GELU's slowdown vs. torch by comparing four call paths at multiple tensor
+sizes:
 
-  - the raw CUDA extension call, bypassing torch.autograd.Function entirely
-  - GELU.apply (goes through torch.autograd.Function.apply)
-  - torch.nn.functional.gelu (builtin ATen op, no custom Function wrapper)
+  - the raw CUDA extension call, bypassing autograd entirely
+  - GELU.apply (torch.autograd.Function.apply, Python-level autograd)
+  - gelu_native (a native ATen op via TORCH_LIBRARY, C++-level autograd)
+  - torch.nn.functional.gelu (builtin ATen op, no custom wrapper at all)
+
+gelu_native was written on the assumption that registering a real dispatcher op with
+autograd wired in C++ would skip GELU.apply's Python-side bookkeeping and close the gap
+to torch's builtin. It doesn't: going through torch.ops.* pays for the dispatcher's own
+key-set computation and calling convention, which turns out to cost more than the
+Python bookkeeping it was meant to avoid, at least for an op this small (see README).
 """
 
 import torch
 import torch.utils.benchmark as benchmark
 
-from ops import GELU, _load_gelu_cuda_ext
+from ops import GELU, _load_gelu_cuda_ext, gelu_native
 
 
 def bench(stmt, globals_, label):
@@ -35,9 +42,14 @@ def main():
     r2 = bench(
         "GELU.apply(x); torch.cuda.synchronize()",
         {"GELU": GELU, "x": x, "torch": torch},
-        "GELU.apply (autograd.Function)",
+        "GELU.apply (Python autograd.Function)",
     )
     r3 = bench(
+        "gelu_native(x); torch.cuda.synchronize()",
+        {"gelu_native": gelu_native, "x": x, "torch": torch},
+        "gelu_native (native ATen op, C++ autograd)",
+    )
+    r4 = bench(
         "torch.nn.functional.gelu(x); torch.cuda.synchronize()",
         {"x": x, "torch": torch},
         "torch gelu",
@@ -45,27 +57,35 @@ def main():
     print(r1)
     print(r2)
     print(r3)
+    print(r4)
 
-    # scaling comparison: raw extension call vs torch gelu as n grows, to see whether
-    # the gap is fixed per-launch overhead (shrinks as a fraction of total time) or
-    # genuinely slower compute (stays proportional)
+    # scaling comparison across all four paths, to see whether gaps are fixed
+    # per-launch overhead (shrinks as a fraction of total time) or genuinely slower
+    # compute (stays proportional)
     print()
     for n in [512 * 768, 8_000_000, 64_000_000]:
         x = torch.randn(n, device="cuda")
-        custom = bench(
-            "ext.forward(x); torch.cuda.synchronize()",
-            {"ext": ext, "x": x, "torch": torch},
-            f"custom n={n}",
+        raw = bench(
+            "ext.forward(x); torch.cuda.synchronize()", {"ext": ext, "x": x, "torch": torch}, "raw"
+        )
+        py = bench(
+            "GELU.apply(x); torch.cuda.synchronize()", {"GELU": GELU, "x": x, "torch": torch}, "py"
+        )
+        native = bench(
+            "gelu_native(x); torch.cuda.synchronize()",
+            {"gelu_native": gelu_native, "x": x, "torch": torch},
+            "native",
         )
         torch_builtin = bench(
             "torch.nn.functional.gelu(x); torch.cuda.synchronize()",
             {"x": x, "torch": torch},
             f"torch n={n}",
         )
-        ratio = custom.median / torch_builtin.median
         print(
-            f"n={n:>10}  custom={custom.median * 1e6:8.2f}us  "
-            f"torch={torch_builtin.median * 1e6:8.2f}us  ratio={ratio:.2f}x"
+            f"n={n:>10}  raw={raw.median * 1e6:7.2f}us  "
+            f"GELU.apply={py.median * 1e6:7.2f}us  "
+            f"gelu_native={native.median * 1e6:7.2f}us  "
+            f"torch={torch_builtin.median * 1e6:7.2f}us"
         )
 
 

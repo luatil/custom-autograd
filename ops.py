@@ -95,7 +95,11 @@ class LayerNorm(Function):
 
 class GELU(Function):
     """Exact GELU (via erf), forward and backward computed by a hand-written CUDA
-    kernel in csrc/gelu_cuda.cu instead of composed torch ops. CUDA-only."""
+    kernel in csrc/gelu_kernel.cu instead of composed torch ops. CUDA-only.
+
+    Autograd is wired here at the Python level (this class). See gelu_native() below
+    for the same kernel exposed as a native ATen op with autograd wired in C++ instead,
+    which skips this class's Function.apply overhead."""
 
     @staticmethod
     def forward(ctx, x) -> Any:
@@ -110,3 +114,14 @@ class GELU(Function):
         (x,) = ctx.saved_tensors
         ext = _load_gelu_cuda_ext()
         return ext.backward(grad_output.contiguous(), x)
+
+
+def gelu_native(x):
+    """Same CUDA kernel as GELU, but registered as a native ATen op (TORCH_LIBRARY in
+    csrc/gelu_ext.cpp) with autograd wired in C++ via torch::autograd::Function, instead
+    of a Python torch.autograd.Function. Calling it skips Function.apply's Python-level
+    bookkeeping (ctx creation, save_for_backward as Python objects, building the graph
+    node in Python) entirely -- that bookkeeping still happens, just in C++. CUDA-only.
+    """
+    _load_gelu_cuda_ext()  # loading the .so runs its TORCH_LIBRARY static initializers
+    return torch.ops.custom_autograd.gelu(x)

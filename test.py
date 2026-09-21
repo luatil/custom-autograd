@@ -1,7 +1,7 @@
 import torch
 from torch.autograd import gradcheck
 
-from ops import GELU, LayerNorm, ReLU, SoftMax
+from ops import GELU, LayerNorm, ReLU, SoftMax, gelu_native
 
 
 def main():
@@ -22,6 +22,7 @@ def main():
     if torch.cuda.is_available():
         x_cuda = x.detach().to("cuda").requires_grad_()
         assert gradcheck(GELU.apply, (x_cuda,), eps=1e-6, atol=1e-4), "GELU"
+        assert gradcheck(gelu_native, (x_cuda,), eps=1e-6, atol=1e-4), "gelu_native"
 
 
 if __name__ == "__main__":
