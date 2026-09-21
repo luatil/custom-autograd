@@ -76,9 +76,10 @@ skip it when `torch.cuda.is_available()` is `False`.
 ## Running
 
 ```
-uv run test.py     # gradcheck all four ops (GELU only if a GPU is available)
-uv run bench.py    # latency: custom vs. torch builtin, on CPU/GPU as available
-uv run example.py  # minimal LayerNorm usage
+uv run test.py                   # gradcheck all four ops (GELU only if a GPU is available)
+uv run bench.py                  # latency: custom vs. torch builtin, on CPU/GPU as available
+uv run bench_gelu_overhead.py    # decomposes GELU's slowdown vs. torch (see below)
+uv run example.py                # minimal LayerNorm usage
 ```
 
 ## Benchmarks
@@ -97,3 +98,41 @@ separate kernel launches under the hood, which is most of the gap to torch's fus
 builtins. `GELU`'s hand-written kernel is a single launch — on par with `ReLU`'s
 slowdown despite doing more math per element, since kernel-launch overhead (not compute)
 dominates at this tensor size.
+
+### Where GELU's slowdown actually comes from
+
+Writing a real CUDA kernel didn't close the gap to `torch.nn.functional.gelu`, which is
+initially surprising — the whole point was to stop being a composition of ATen calls.
+`bench_gelu_overhead.py` isolates two separate, stacking causes by comparing three call
+paths (raw extension call, `GELU.apply`, and torch's builtin) and by varying tensor size:
+
+```
+raw extension call (no autograd)   25.6 us
+GELU.apply (autograd.Function)     34.4 us
+torch gelu                         19.3 us
+
+n=    393216  custom=  25.8us  torch=19.3us  ratio=1.34x
+n=   8000000  custom= 216.2us  torch=210.6us  ratio=1.03x
+n=  64000000  custom=1620.3us  torch=1599.4us  ratio=1.01x
+```
+
+**1. `torch.autograd.Function.apply` overhead (~9 us, the bigger piece here).**
+`GELU.apply(x)` builds a graph node, runs `ctx.save_for_backward`, and goes through
+autograd/dispatcher bookkeeping before the C++ call happens at all. Calling the compiled
+extension's `forward` directly (skipping `Function.apply`) drops 34.4us to 25.6us.
+`torch.nn.functional.gelu` has no such wrapper — its backward is a natively registered
+ATen op, not a Python-level `Function`. This is also why the composed-tensor-op ops
+(`ReLU`, `SoftMax`, `LayerNorm`) show similar 2-4x slowdowns despite doing nothing but
+calling into ATen: the overhead is inherent to wrapping any op in a custom
+`autograd.Function`, not specific to hand-writing CUDA.
+
+**2. Fixed per-launch overhead, not slower compute (~6 us at this size, vanishes at scale).**
+Even bypassing autograd, the raw extension call is slower than torch's builtin at 393K
+elements (25.8 vs 19.3us) but nearly identical at 64M elements (1.01x). GELU is memory-
+bound and this tensor is tiny, so at 393K elements you're mostly measuring fixed
+per-call cost — the pybind11 call boundary (marshaling the `torch::Tensor` argument,
+`TORCH_CHECK` validation) plus kernel launch, versus torch's builtin going through an
+already-warm, C++-resident dispatch path. The 1% gap at 64M elements shows the actual
+memory-bandwidth-bound kernel work is essentially the same; the naive one-element-per-
+thread kernel isn't meaningfully worse than torch's at doing the real work, it's just
+worse at the fixed cost of getting there.
